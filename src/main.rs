@@ -15,12 +15,12 @@ use std::path::PathBuf;
 use std::os::fd::AsRawFd;
 use nix::errno;
 
-fn next_cmd(input: &mut File) -> Result<Result<FastbootCmd, &'static str>> {
-    let mut tmp: Vec<u8> = Vec::with_capacity(64);
+fn read_usb(ep: &mut File, size: usize) -> Result<Vec<u8>> {
+    let mut tmp: Vec<u8> = Vec::with_capacity(size);
     unsafe {
-        let ret = libc::read(input.as_raw_fd(),
+        let ret = libc::read(ep.as_raw_fd(),
                 tmp.as_mut_ptr().cast(),
-                64);
+                size);
 
         if ret < 0 {
             return Err(errno::from_i32(nix::errno::errno()).into());
@@ -28,14 +28,18 @@ fn next_cmd(input: &mut File) -> Result<Result<FastbootCmd, &'static str>> {
 
         tmp.set_len(ret as usize);
     }
+    Ok(tmp)
+}
 
+fn next_cmd(input: &mut File) -> Result<Result<FastbootCmd, &'static str>> {
+    let tmp = read_usb(input, 64)?;
     let raw = String::from_utf8_lossy(&tmp);
-    let mut split = raw.split(':');
+    let (cmd, param) = match raw.split_once(':') {
+        Some((a, b)) => (a.to_string(), Some(b)),
+        None => (raw.to_string(), None),
+    };
 
-    let cmd = split.next().unwrap();
-    let param = split.next().map(|v| v.to_string());
-
-    Ok(cmd::parse(cmd, param))
+    Ok(cmd::parse(&cmd, param.map(|v| v.to_string())))
 }
 
 #[derive(Clone, Debug)]
@@ -55,7 +59,7 @@ impl FbReply<'_> {
             Text(v) => format!("TEXT{v}"),
             Fail(v) => format!("FAIL{v}"),
             Okay(v) => format!("OKAY{v}"),
-            Data(v) => format!("DATA{v:x}"),
+            Data(v) => format!("DATA{v:08x}"),
         };
         
         let mut ret: Vec<u8> = string.into();
@@ -63,7 +67,7 @@ impl FbReply<'_> {
         ret
     }
     pub fn send(self, ep_in: &mut File) -> Result<()> {
-        ep_in.write_all(&self.to_bytes());
+        ep_in.write_all(&self.to_bytes())?;
         Ok(())
     }
 }
@@ -100,13 +104,12 @@ fn main() -> Result<()> {
     loop {
         let cmd = next_cmd(&mut ep_out)
             .context("Failed to read next command")?;
-        println!("{:?}", &cmd);
         match cmd {
             Ok(cmd) => {
                 match cmd.run(&mut ep_in, &mut ep_out) {
                     Ok(()) => (),
                     Err(e) => {
-                        eprintln!("Failed to run fastboot command: {}, due to:", e);
+                        eprintln!("Failed to run fastboot command");
                         for cause in e.chain() {
                             eprintln!("{}", cause);
                         }
