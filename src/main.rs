@@ -13,6 +13,7 @@ use std::io::Write;
 use std::fs::File;
 use std::path::PathBuf;
 use std::os::fd::AsRawFd;
+use std::convert::Infallible;
 use nix::errno;
 
 fn read_usb(ep: &mut File, size: usize) -> Result<Vec<u8>> {
@@ -72,6 +73,17 @@ impl FbReply<'_> {
     }
 }
 
+fn reboot() -> Result<Infallible> {
+    todo!()
+}
+
+#[derive(Copy, Clone, Debug)]
+pub enum NextAction {
+    Reboot,
+    Boot,
+    Continue,
+}
+
 fn main() -> Result<()> {
     let endpoint_path = PathBuf::from(env::args().skip(1).next()
         .expect("First argument has to be functionfs path"));
@@ -107,7 +119,13 @@ fn main() -> Result<()> {
         match cmd {
             Ok(cmd) => {
                 match cmd.run(&mut ep_in, &mut ep_out) {
-                    Ok(()) => (),
+                    Ok(a) => if let Some(act) = a {
+                        match act {
+                            NextAction::Reboot => reboot()?,
+                            NextAction::Continue => break,
+                            NextAction::Boot => todo!(),
+                        };
+                    },
                     Err(e) => {
                         eprintln!("Failed to run fastboot command");
                         for cause in e.chain() {
@@ -121,6 +139,8 @@ fn main() -> Result<()> {
                 ep_in.write_all(&FbReply::Fail(e).to_bytes())?;
             }
         }
-
     }
+
+    println!("Carrying on to OS");
+    Ok(())
 }

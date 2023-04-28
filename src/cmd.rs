@@ -1,4 +1,4 @@
-use anyhow::{Context, Result};
+use anyhow::Result;
 
 pub fn parse(cmd: &str, param: Option<String>) -> Result<FastbootCmd, &'static str> {
     use FastbootCmd::*;
@@ -12,6 +12,9 @@ pub fn parse(cmd: &str, param: Option<String>) -> Result<FastbootCmd, &'static s
         },
         "getvar" => Ok(Getvar(param.ok_or("Missing parameter")?)),
         "flash" => Ok(Flash(param.ok_or("Missing parameter")?)),
+        "reboot" => Ok(Reboot),
+        "boot" => Ok(Boot),
+        "continue" => Ok(Continue),
         _ => Err("Unknown command"),
     }
 }
@@ -20,25 +23,40 @@ pub fn parse(cmd: &str, param: Option<String>) -> Result<FastbootCmd, &'static s
 pub enum FastbootCmd {
     Getvar(String),
     Download(u32),
-    Upload,
     Flash(String),
     Erase(String),
     Boot,
     Continue,
     Reboot,
-    RebootBootloader,
 }
 
 use std::fs::File;
-use std::io::Read;
 use crate::{read_usb, FbReply};
 use once_cell::sync::Lazy;
 use std::sync::Mutex;
+use std::path::PathBuf;
+use crate::NextAction;
+use std::env;
 
 static PREV_DATA: Lazy<Mutex<Option<Vec<u8>>>> = Lazy::new(|| Mutex::new(None));
 
+fn partition_path(name: &str) -> Option<PathBuf> {
+    let tmp = if env::var("FBRS_PART_PATH").is_ok() &&
+        PathBuf::from(env::var("FBRS_PART_PATH").unwrap()).exists()
+    {
+        Some(PathBuf::from(env::var("FBRS_PART_PATH").unwrap()))
+    } else if PathBuf::from("/dev/disk/by-partlabel/").exists() {
+        Some(PathBuf::from("/dev/disk/by-partlabel/"))
+    } else if PathBuf::from("/dev/block/by-name/").exists() {
+        Some(PathBuf::from("/dev/block/by-name/"))
+    } else {
+        None
+    };
+    tmp.map(|v| v.join(name)).filter(|v| v.exists())
+}
+
 impl FastbootCmd {
-    pub fn run(self, ep_in: &mut File, ep_out: &mut File) -> Result<()> {
+    pub fn run(self, ep_in: &mut File, ep_out: &mut File) -> Result<Option<NextAction>> {
         use FastbootCmd::*;
         match self {
             Getvar(which) => {
@@ -72,16 +90,33 @@ impl FastbootCmd {
                 FbReply::Okay("").send(ep_in)?;
             },
             Flash(what) => {
-                let mut data = PREV_DATA.lock().unwrap().take();
-                if data.is_none() {
+                let Some(data) = PREV_DATA.lock().unwrap().take() else {
                     FbReply::Fail("No data sent for writing").send(ep_in)?;
-                    return Ok(());
-                }
-                FbReply::Info("Flash writing is todo").send(ep_in)?;
+                    return Ok(None);
+                };
+
+                let Some(path) = partition_path(&what) else {
+                    FbReply::Fail("Couldn't find target partition").send(ep_in)?;
+                    return Ok(None);
+                };
+
+                std::fs::write(path, data)?;
+
                 FbReply::Okay("").send(ep_in)?;
             },
+            Reboot => {
+                FbReply::Okay("").send(ep_in)?;
+                return Ok(Some(NextAction::Reboot));
+            },
+            Continue => {
+                FbReply::Okay("").send(ep_in)?;
+                return Ok(Some(NextAction::Continue));
+            },
+            Boot => {
+                FbReply::Fail("todo").send(ep_in)?;
+            }
             _ => todo!(),
         }
-        Ok(())
+        Ok(None)
     }
 }
